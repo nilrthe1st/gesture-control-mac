@@ -190,13 +190,16 @@ class SwipeDetector:
     """
     Detects a horizontal swipe gesture from wrist x-trajectory.
 
-    Structure is complete; actual swipe classification is not yet implemented.
+    Fires NEXT_TRACK on a right swipe and PREV_TRACK on a left swipe when:
+      - The deque has accumulated swipe_window_frames samples.
+      - The horizontal displacement exceeds swipe_min_delta_x.
+      - The vertical displacement stays below swipe_max_delta_y.
     """
 
     def __init__(self, config: Config) -> None:
         self._config = config
         self._state = _SwipeState.TRACKING
-        self._trajectory: deque[tuple[float, float]] = deque(
+        self._trajectory: deque[tuple[float, float, float]] = deque(
             maxlen=config.swipe_window_frames
         )
         self._cooldown_start: float = 0.0
@@ -213,16 +216,37 @@ class SwipeDetector:
             return None
 
         # TRACKING state
-        if detection.wrist_x is not None:
-            self._trajectory.append((detection.timestamp, detection.wrist_x))
+        if detection.wrist_x is not None and detection.wrist_y is not None:
+            self._trajectory.append((detection.timestamp, detection.wrist_x, detection.wrist_y))
 
-        # TODO: implement swipe detection logic
+        # Only evaluate when the window is full.
+        if len(self._trajectory) == cfg.swipe_window_frames:
+            oldest = self._trajectory[0]   # (timestamp, x, y)
+            newest = self._trajectory[-1]  # (timestamp, x, y)
+            delta_x = newest[1] - oldest[1]
+            delta_y = abs(newest[2] - oldest[2])
+            if delta_y < cfg.swipe_max_delta_y:
+                if delta_x > cfg.swipe_min_delta_x:
+                    self._state = _SwipeState.COOLDOWN
+                    self._cooldown_start = detection.timestamp
+                    self._trajectory.clear()
+                    return Action.NEXT_TRACK
+                elif delta_x < -cfg.swipe_min_delta_x:
+                    self._state = _SwipeState.COOLDOWN
+                    self._cooldown_start = detection.timestamp
+                    self._trajectory.clear()
+                    return Action.PREV_TRACK
+
         return None
 
     def reset(self) -> None:
         self._state = _SwipeState.TRACKING
         self._trajectory.clear()
         self._cooldown_start = 0.0
+
+    @property
+    def state_name(self) -> str:
+        return self._state.name
 
 
 # ---------------------------------------------------------------------------
@@ -279,10 +303,27 @@ class PinchDragDetector:
                 self._anchor_y = None
                 return None
 
-            # TODO: implement volume step logic
+            # Compute incremental delta from anchor.
+            if self._anchor_y is not None and detection.wrist_y is not None:
+                delta_y = self._anchor_y - detection.wrist_y  # positive = hand moved up
+                if delta_y >= cfg.volume_step_delta_y:
+                    self._anchor_y = detection.wrist_y  # update anchor (incremental)
+                    self._cooldown_start = detection.timestamp
+                    self._state = _PinchState.COOLDOWN_STEP
+                    return Action.VOLUME_UP
+                elif delta_y <= -cfg.volume_step_delta_y:
+                    self._anchor_y = detection.wrist_y
+                    self._cooldown_start = detection.timestamp
+                    self._state = _PinchState.COOLDOWN_STEP
+                    return Action.VOLUME_DOWN
+
             return None
 
         if self._state is _PinchState.COOLDOWN_STEP:
+            if distance is None or distance > cfg.pinch_release_threshold:
+                self._state = _PinchState.IDLE
+                self._anchor_y = None
+                return None
             elapsed = detection.timestamp - self._cooldown_start
             if elapsed >= cfg.volume_cooldown_seconds:
                 self._state = _PinchState.PINCHING
@@ -294,6 +335,10 @@ class PinchDragDetector:
         self._state = _PinchState.IDLE
         self._anchor_y = None
         self._cooldown_start = 0.0
+
+    @property
+    def state_name(self) -> str:
+        return self._state.name
 
 
 # ---------------------------------------------------------------------------
@@ -362,4 +407,18 @@ class GestureDispatcher:
                 "state": self._hold_fist.state_name,
                 "hold_start": self._hold_fist.hold_start,
             },
+        }
+
+    def get_dynamic_states(self) -> dict:
+        """Returns swipe and pinch detector states for overlay rendering.
+
+        Returns:
+            {
+                "swipe": "TRACKING" | "COOLDOWN",
+                "pinch": "IDLE" | "PINCHING" | "COOLDOWN_STEP",
+            }
+        """
+        return {
+            "swipe": self._swipe.state_name,
+            "pinch": self._pinch.state_name,
         }

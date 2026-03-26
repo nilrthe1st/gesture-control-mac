@@ -108,6 +108,7 @@ def draw_overlay(
     fps: float,
     hold_states: dict | None = None,
     config: Config | None = None,
+    dynamic_states: dict | None = None,
 ) -> None:
     """Draw gesture label, action, FPS counter, and hold phase onto frame in-place."""
     h, w = frame.shape[:2]
@@ -170,6 +171,18 @@ def draw_overlay(
 
     if hold_phase_text is not None:
         lines.append((hold_phase_text, hold_phase_color))
+
+    # Dynamic detector states (swipe/pinch) — only show non-idle/non-tracking.
+    if dynamic_states is not None:
+        color_teal = (200, 200, 0)  # BGR teal
+        swipe_state = dynamic_states.get("swipe", "TRACKING")
+        pinch_state = dynamic_states.get("pinch", "IDLE")
+        if swipe_state == "COOLDOWN":
+            lines.append(("Swipe: COOLDOWN", color_grey))
+        if pinch_state == "PINCHING":
+            lines.append(("Pinch: PINCHING", color_teal))
+        elif pinch_state == "COOLDOWN_STEP":
+            lines.append(("Pinch: COOLDOWN", color_grey))
 
     y_offset = 20
     last_y_bottom = 20
@@ -282,7 +295,11 @@ def run(config: Config, dry_run: bool) -> None:
                 fps = (len(frame_times) - 1) / (frame_times[-1] - frame_times[0])
 
             hold_states = dispatcher.get_hold_states()
-            draw_overlay(frame, detection, last_action, fps, hold_states=hold_states, config=config)
+            dynamic_states = dispatcher.get_dynamic_states()
+            draw_overlay(
+                frame, detection, last_action, fps,
+                hold_states=hold_states, config=config, dynamic_states=dynamic_states,
+            )
             cv2.imshow("Gesture Control", frame)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):

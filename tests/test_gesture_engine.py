@@ -255,12 +255,11 @@ class TestHoldDetector:
 
 
 # ---------------------------------------------------------------------------
-# SwipeDetector tests — xfail stubs (not yet implemented)
+# SwipeDetector tests
 # ---------------------------------------------------------------------------
 
 class TestSwipeDetector:
 
-    @pytest.mark.xfail(reason="swipe not yet implemented", strict=True)
     def test_swipe_right_fires_next_track(self, fast_config: Config) -> None:
         detector = SwipeDetector(fast_config)
         t = 0.0
@@ -274,7 +273,6 @@ class TestSwipeDetector:
             t += 0.033
         assert result is Action.NEXT_TRACK
 
-    @pytest.mark.xfail(reason="swipe not yet implemented", strict=True)
     def test_swipe_left_fires_prev_track(self, fast_config: Config) -> None:
         detector = SwipeDetector(fast_config)
         t = 0.0
@@ -326,12 +324,11 @@ class TestSwipeDetector:
 
 
 # ---------------------------------------------------------------------------
-# PinchDragDetector tests — xfail stubs (not yet implemented)
+# PinchDragDetector tests
 # ---------------------------------------------------------------------------
 
 class TestPinchDragDetector:
 
-    @pytest.mark.xfail(reason="pinch drag not yet implemented", strict=True)
     def test_pinch_drag_up_fires_volume_up(self, fast_config: Config) -> None:
         detector = PinchDragDetector(fast_config)
         t = 0.0
@@ -354,7 +351,6 @@ class TestPinchDragDetector:
         )
         assert result is Action.VOLUME_UP
 
-    @pytest.mark.xfail(reason="pinch drag not yet implemented", strict=True)
     def test_pinch_drag_down_fires_volume_down(self, fast_config: Config) -> None:
         detector = PinchDragDetector(fast_config)
         t = 0.0
@@ -374,6 +370,44 @@ class TestPinchDragDetector:
             )
         )
         assert result is Action.VOLUME_DOWN
+
+    def test_pinch_release_during_cooldown_step_resets_to_idle(self, fast_config: Config) -> None:
+        """
+        Releasing the pinch while in COOLDOWN_STEP should immediately transition
+        to IDLE, not wait for cooldown to expire and re-enter PINCHING.
+        """
+        cfg = Config(
+            pinch_distance_threshold=0.05,
+            pinch_release_threshold=0.08,
+            volume_step_delta_y=0.03,
+            volume_cooldown_seconds=1.0,  # long cooldown so COOLDOWN_STEP is active
+        )
+        detector = PinchDragDetector(cfg)
+        t = 0.0
+        # Enter PINCHING
+        detector.update(make_detection(
+            thumb_tip_x=0.5, thumb_tip_y=0.5,
+            index_tip_x=0.52, index_tip_y=0.52,
+            wrist_y=0.6, timestamp=t,
+        ))
+        t += 0.033
+        # Fire VOLUME_UP -> enter COOLDOWN_STEP
+        r = detector.update(make_detection(
+            thumb_tip_x=0.5, thumb_tip_y=0.5,
+            index_tip_x=0.52, index_tip_y=0.52,
+            wrist_y=0.55, timestamp=t,  # delta_y = 0.05 >= 0.03
+        ))
+        assert r is Action.VOLUME_UP
+        assert detector.state_name == "COOLDOWN_STEP"
+        t += 0.033
+        # Release pinch during COOLDOWN_STEP (distance >> threshold)
+        r = detector.update(make_detection(
+            thumb_tip_x=0.5, thumb_tip_y=0.5,
+            index_tip_x=0.7, index_tip_y=0.7,  # distance ≈ 0.28 > release threshold
+            wrist_y=0.55, timestamp=t,
+        ))
+        assert r is None
+        assert detector.state_name == "IDLE"
 
     def test_pinch_release_resets_to_idle(self, fast_config: Config) -> None:
         """
@@ -539,3 +573,97 @@ class TestGestureDispatcher:
         states = dispatcher.get_hold_states()
         assert states["fist"]["state"] == "COOLDOWN"
         assert states["fist"]["hold_start"] > 0.0, "hold_start must remain set in COOLDOWN"
+
+    def test_dispatcher_get_dynamic_states(self, fast_config: Config) -> None:
+        """get_dynamic_states() should return swipe and pinch state names."""
+        dispatcher = GestureDispatcher(fast_config)
+        states = dispatcher.get_dynamic_states()
+        assert states["swipe"] == "TRACKING"
+        assert states["pinch"] == "IDLE"
+
+
+# ---------------------------------------------------------------------------
+# SwipeDetector — cooldown test (needs a separate Config with positive cooldown)
+# ---------------------------------------------------------------------------
+
+class TestSwipeDetectorCooldown:
+
+    def test_swipe_cooldown_blocks_immediate_retrigger(self) -> None:
+        """After a swipe fires, COOLDOWN blocks a second fire until it expires."""
+        cfg = Config(
+            swipe_window_frames=14,
+            swipe_min_delta_x=0.18,
+            swipe_max_delta_y=0.10,
+            swipe_cooldown_seconds=1.0,  # non-zero
+        )
+        detector = SwipeDetector(cfg)
+        n = cfg.swipe_window_frames
+        t = 0.0
+
+        # First right swipe — should fire on the 14th frame.
+        first_result = None
+        for i in range(n):
+            x = 0.1 + 0.3 * (i / (n - 1))
+            r = detector.update(make_detection(wrist_x=x, wrist_y=0.5, timestamp=t))
+            if r is not None:
+                first_result = r
+            t += 0.033
+        assert first_result is Action.NEXT_TRACK
+
+        # Immediately attempt a second right swipe — deque was cleared, only ~0.46s elapsed.
+        second_result = None
+        for i in range(n):
+            x = 0.1 + 0.3 * (i / (n - 1))
+            r = detector.update(make_detection(wrist_x=x, wrist_y=0.5, timestamp=t))
+            if r is not None:
+                second_result = r
+            t += 0.033
+        assert second_result is None, "Cooldown should block immediate retrigger"
+
+
+# ---------------------------------------------------------------------------
+# PinchDragDetector — incremental multi-step test
+# ---------------------------------------------------------------------------
+
+class TestPinchDragDetectorIncremental:
+
+    def test_pinch_multi_step_incremental(self, fast_config: Config) -> None:
+        """Each upward step fires VOLUME_UP independently; anchor updates after each step."""
+        detector = PinchDragDetector(fast_config)  # volume_cooldown_seconds=0.0
+        t = 0.0
+
+        # Enter pinch: distance ≈ 0.028 < threshold 0.05; anchor_y set to 0.60.
+        detector.update(make_detection(
+            thumb_tip_x=0.5, thumb_tip_y=0.5,
+            index_tip_x=0.52, index_tip_y=0.52,
+            wrist_y=0.60, timestamp=t,
+        ))
+        t += 0.033
+
+        # Step 1: move up by 0.04 (> threshold 0.03, avoids float rounding on boundary).
+        r1 = detector.update(make_detection(
+            thumb_tip_x=0.5, thumb_tip_y=0.5,
+            index_tip_x=0.52, index_tip_y=0.52,
+            wrist_y=0.56, timestamp=t,   # delta = 0.60 - 0.56 = 0.04
+        ))
+        t += 0.033
+        assert r1 is Action.VOLUME_UP
+
+        # The COOLDOWN_STEP handler transitions to PINCHING and returns None on the
+        # frame that expires cooldown; volume is checked on the *next* PINCHING frame.
+        # Frame 3: COOLDOWN_STEP → PINCHING (returns None; anchor stays at 0.56).
+        r_transition = detector.update(make_detection(
+            thumb_tip_x=0.5, thumb_tip_y=0.5,
+            index_tip_x=0.52, index_tip_y=0.52,
+            wrist_y=0.56, timestamp=t,   # same as anchor; no step yet
+        ))
+        t += 0.033
+        assert r_transition is None
+
+        # Frame 4: PINCHING, anchor=0.56; move up another 0.04 → fire VOLUME_UP.
+        r2 = detector.update(make_detection(
+            thumb_tip_x=0.5, thumb_tip_y=0.5,
+            index_tip_x=0.52, index_tip_y=0.52,
+            wrist_y=0.52, timestamp=t,   # delta = 0.56 - 0.52 = 0.04
+        ))
+        assert r2 is Action.VOLUME_UP
