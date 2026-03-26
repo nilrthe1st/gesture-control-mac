@@ -15,6 +15,7 @@ Flags:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 
@@ -105,8 +106,10 @@ def draw_overlay(
     detection: Detection,
     action: Action | None,
     fps: float,
+    hold_states: dict | None = None,
+    config: Config | None = None,
 ) -> None:
-    """Draw gesture label, action, and FPS counter onto frame in-place."""
+    """Draw gesture label, action, FPS counter, and hold phase onto frame in-place."""
     h, w = frame.shape[:2]
 
     label_text = (
@@ -122,6 +125,8 @@ def draw_overlay(
     color_white = (255, 255, 255)
     color_green = (0, 220, 80)
     color_yellow = (0, 210, 255)
+    color_orange = (0, 165, 255)   # BGR: orange
+    color_grey = (140, 140, 140)
     bg_color = (30, 30, 30)
     padding = 6
 
@@ -131,7 +136,43 @@ def draw_overlay(
         (f"FPS:     {fps:.1f}", color_yellow),
     ]
 
+    # Determine hold phase line and progress bar parameters from hold_states.
+    hold_phase_text: str | None = None
+    hold_phase_color = color_white
+    hold_progress: float | None = None  # 0.0–1.0 when HOLDING, else None
+
+    if hold_states is not None:
+        # Prefer whichever detector is in a non-IDLE state (palm checked first).
+        active_state: str | None = None
+        active_hold_start: float = 0.0
+        for key in ("palm", "fist"):
+            entry = hold_states[key]
+            if entry["state"] != "IDLE":
+                active_state = entry["state"]
+                active_hold_start = entry["hold_start"]
+                break
+
+        if active_state == "STABILIZING":
+            hold_phase_text = "Hold: STABILIZING"
+            hold_phase_color = color_yellow
+        elif active_state == "HOLDING":
+            if config is not None:
+                elapsed = detection.timestamp - active_hold_start
+                trigger = config.hold_trigger_seconds
+                hold_progress = min(elapsed / trigger, 1.0) if trigger > 0 else 1.0
+                hold_phase_text = f"Hold: HOLDING  {elapsed:.1f}s / {trigger:.1f}s"
+            else:
+                hold_phase_text = "Hold: HOLDING"
+            hold_phase_color = color_orange
+        elif active_state == "COOLDOWN":
+            hold_phase_text = "Hold: COOLDOWN"
+            hold_phase_color = color_grey
+
+    if hold_phase_text is not None:
+        lines.append((hold_phase_text, hold_phase_color))
+
     y_offset = 20
+    last_y_bottom = 20
     for text, color in lines:
         (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
         # Semi-transparent background rectangle
@@ -143,7 +184,32 @@ def draw_overlay(
             cv2.FILLED,
         )
         cv2.putText(frame, text, (8 + padding, y_offset), font, scale, color, thickness)
+        last_y_bottom = y_offset + baseline + padding
         y_offset += th + baseline + padding * 2 + 4
+
+    # Draw hold progress bar when HOLDING.
+    if hold_progress is not None:
+        bar_max_width = 120
+        bar_height = 6
+        bar_x = 8
+        bar_y = last_y_bottom + 4
+        # Background bar (dark grey)
+        cv2.rectangle(
+            frame,
+            (bar_x, bar_y),
+            (bar_x + bar_max_width, bar_y + bar_height),
+            (60, 60, 60),
+            cv2.FILLED,
+        )
+        # Fill bar (orange)
+        fill_width = max(1, int(bar_max_width * hold_progress))
+        cv2.rectangle(
+            frame,
+            (bar_x, bar_y),
+            (bar_x + fill_width, bar_y + bar_height),
+            color_orange,
+            cv2.FILLED,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +281,8 @@ def run(config: Config, dry_run: bool) -> None:
             if len(frame_times) >= 2:
                 fps = (len(frame_times) - 1) / (frame_times[-1] - frame_times[0])
 
-            draw_overlay(frame, detection, last_action, fps)
+            hold_states = dispatcher.get_hold_states()
+            draw_overlay(frame, detection, last_action, fps, hold_states=hold_states, config=config)
             cv2.imshow("Gesture Control", frame)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -272,6 +339,19 @@ def main() -> None:
 
     from dataclasses import replace
     config = replace(DEFAULT_CONFIG, **overrides) if overrides else DEFAULT_CONFIG
+
+    # Fail early with a clear message if the model file is missing.
+    if not os.path.isfile(config.model_path):
+        print(
+            f"ERROR: model file not found: {config.model_path}\n"
+            "\n"
+            "Run the download script first:\n"
+            "    bash scripts/download_model.sh\n"
+            "\n"
+            "Or pass a custom path with --model PATH",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     run(config, dry_run=args.dry_run)
 

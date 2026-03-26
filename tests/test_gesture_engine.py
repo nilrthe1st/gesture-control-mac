@@ -17,21 +17,6 @@ from src.gesture_engine import GestureDispatcher, HoldDetector, PinchDragDetecto
 from tests.conftest import make_detection, make_no_hand
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _feed_hold_to_stabilizing(detector: HoldDetector, cfg: Config, t0: float) -> float:
-    """
-    Feed exactly hold_stability_frames frames of a matching gesture so the
-    detector reaches HOLDING state.  Returns the timestamp of the last frame.
-    """
-    t = t0
-    for _ in range(cfg.hold_stability_frames):
-        detector.update(make_detection(gesture_label="Open_Palm", timestamp=t))
-        t += 0.033  # ~30 fps
-    return t
-
 
 # ---------------------------------------------------------------------------
 # HoldDetector tests (fully implemented — must all pass)
@@ -124,6 +109,90 @@ class TestHoldDetector:
             )
             assert result is None
             t += 0.033
+
+    def test_fist_fires_mute_toggle(self, fast_config: Config) -> None:
+        """Closed_Fist hold should fire MUTE_TOGGLE after stability + trigger."""
+        detector = HoldDetector("Closed_Fist", Action.MUTE_TOGGLE, fast_config)
+        t = 0.0
+
+        # Feed stability frames to reach HOLDING
+        for _ in range(fast_config.hold_stability_frames):
+            result = detector.update(make_detection(gesture_label="Closed_Fist", timestamp=t))
+            assert result is None, "No action should fire during STABILIZING"
+            t += 0.033
+
+        # With hold_trigger_seconds=0.0 the very next frame fires
+        result = detector.update(make_detection(gesture_label="Closed_Fist", timestamp=t))
+        assert result is Action.MUTE_TOGGLE
+
+    def test_fist_cooldown_blocks_retrigger(self) -> None:
+        """After MUTE_TOGGLE fires, non-zero cooldown must block immediate retrigger."""
+        cfg = Config(
+            hold_stability_frames=2,
+            hold_trigger_seconds=0.0,
+            hold_cooldown_seconds=1.2,
+        )
+        detector = HoldDetector("Closed_Fist", Action.MUTE_TOGGLE, cfg)
+        t = 0.0
+
+        # Reach HOLDING and fire
+        for _ in range(cfg.hold_stability_frames):
+            detector.update(make_detection(gesture_label="Closed_Fist", timestamp=t))
+            t += 0.033
+        first = detector.update(make_detection(gesture_label="Closed_Fist", timestamp=t))
+        assert first is Action.MUTE_TOGGLE
+
+        # Immediately attempt retrigger — cooldown has not expired
+        t += 0.001
+        second = detector.update(make_detection(gesture_label="Closed_Fist", timestamp=t))
+        assert second is None, "Cooldown should block immediate retrigger"
+
+    def test_hold_detector_exposes_state_name(self, fast_config: Config) -> None:
+        """state_name property should reflect the FSM state at each transition."""
+        detector = HoldDetector("Open_Palm", Action.PLAY_PAUSE, fast_config)
+        t = 0.0
+
+        # Initially IDLE
+        assert detector.state_name == "IDLE"
+
+        # First matching frame -> STABILIZING
+        detector.update(make_detection(gesture_label="Open_Palm", timestamp=t))
+        t += 0.033
+        assert detector.state_name == "STABILIZING"
+
+        # Complete stability frames -> HOLDING
+        # fast_config.hold_stability_frames == 2; one frame already counted above
+        for _ in range(fast_config.hold_stability_frames - 1):
+            detector.update(make_detection(gesture_label="Open_Palm", timestamp=t))
+            t += 0.033
+        assert detector.state_name == "HOLDING"
+
+        # Trigger (hold_trigger_seconds=0.0) -> COOLDOWN
+        detector.update(make_detection(gesture_label="Open_Palm", timestamp=t))
+        assert detector.state_name == "COOLDOWN"
+
+    def test_hold_detector_exposes_hold_start(self, fast_config: Config) -> None:
+        """hold_start should be 0.0 until HOLDING is entered, then set to the frame timestamp."""
+        detector = HoldDetector("Open_Palm", Action.PLAY_PAUSE, fast_config)
+        t = 0.0
+
+        assert detector.hold_start == 0.0, "Should be 0.0 in IDLE"
+
+        # Enter STABILIZING
+        detector.update(make_detection(gesture_label="Open_Palm", timestamp=t))
+        t += 0.033
+        assert detector.hold_start == 0.0, "Should still be 0.0 in STABILIZING"
+
+        # Complete stability frames to reach HOLDING; the last stabilizing frame
+        # sets _hold_start to its timestamp.
+        for _ in range(fast_config.hold_stability_frames - 1):
+            detector.update(make_detection(gesture_label="Open_Palm", timestamp=t))
+            t += 0.033
+        # Now in HOLDING: hold_start should equal the timestamp of the frame that
+        # pushed stable_frames over the threshold (i.e. t - 0.033).
+        expected_hold_start = t - 0.033
+        assert detector.state_name == "HOLDING"
+        assert abs(detector.hold_start - expected_hold_start) < 1e-9
 
     def test_hold_hysteresis_on_break(self, fast_config: Config) -> None:
         """
@@ -412,3 +481,61 @@ class TestGestureDispatcher:
             t += 0.033
 
         assert last_result is Action.PLAY_PAUSE
+
+    def test_dispatcher_fist_hold_fires_mute(self, fast_config: Config) -> None:
+        """
+        End-to-end: feeding hold_stability_frames + 1 Closed_Fist frames through
+        the dispatcher should yield Action.MUTE_TOGGLE on the last frame.
+        """
+        dispatcher = GestureDispatcher(fast_config)
+        t = 0.0
+        last_result: Action | None = None
+
+        total_frames = fast_config.hold_stability_frames + 1
+        for _ in range(total_frames):
+            result = dispatcher.update(
+                make_detection(gesture_label="Closed_Fist", timestamp=t)
+            )
+            if result is not None:
+                last_result = result
+            t += 0.033
+
+        assert last_result is Action.MUTE_TOGGLE
+
+    def test_dispatcher_get_hold_states_returns_state(self, fast_config: Config) -> None:
+        """
+        get_hold_states() should return a dict with 'palm' and 'fist' keys, each
+        containing 'state' and 'hold_start'.  The state should reflect which
+        detector is active as frames are fed.
+        """
+        dispatcher = GestureDispatcher(fast_config)
+        t = 0.0
+
+        # Initially both should be IDLE
+        states = dispatcher.get_hold_states()
+        assert states["palm"]["state"] == "IDLE"
+        assert states["fist"]["state"] == "IDLE"
+        assert states["palm"]["hold_start"] == 0.0
+        assert states["fist"]["hold_start"] == 0.0
+
+        # Feed one Closed_Fist frame -> fist detector enters STABILIZING
+        dispatcher.update(make_detection(gesture_label="Closed_Fist", timestamp=t))
+        t += 0.033
+        states = dispatcher.get_hold_states()
+        assert states["palm"]["state"] == "IDLE"
+        assert states["fist"]["state"] == "STABILIZING"
+
+        # Feed enough frames to reach HOLDING
+        for _ in range(fast_config.hold_stability_frames - 1):
+            dispatcher.update(make_detection(gesture_label="Closed_Fist", timestamp=t))
+            t += 0.033
+        states = dispatcher.get_hold_states()
+        assert states["fist"]["state"] == "HOLDING"
+        assert states["fist"]["hold_start"] > 0.0
+
+        # Trigger the action (hold_trigger_seconds=0.0) -> COOLDOWN
+        dispatcher.update(make_detection(gesture_label="Closed_Fist", timestamp=t))
+        t += 0.033
+        states = dispatcher.get_hold_states()
+        assert states["fist"]["state"] == "COOLDOWN"
+        assert states["fist"]["hold_start"] > 0.0, "hold_start must remain set in COOLDOWN"

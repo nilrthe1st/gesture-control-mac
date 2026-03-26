@@ -95,6 +95,18 @@ class HoldDetector:
         self._hold_start = 0.0
         self._cooldown_start = 0.0
 
+    @property
+    def state_name(self) -> str:
+        """Returns the name of the current HoldState, e.g. 'IDLE', 'STABILIZING', 'HOLDING', 'COOLDOWN'."""
+        return self._state.name
+
+    @property
+    def hold_start(self) -> float:
+        """Returns the timestamp when HOLDING state was entered, or 0.0 if not in HOLDING/COOLDOWN."""
+        if self._state in (_HoldState.HOLDING, _HoldState.COOLDOWN):
+            return self._hold_start
+        return 0.0
+
     # ------------------------------------------------------------------
     # Private per-state handlers
     # ------------------------------------------------------------------
@@ -331,3 +343,23 @@ class GestureDispatcher:
         self._swipe.reset()
         self._pinch.reset()
         self._no_hand_frames = 0
+
+    def get_hold_states(self) -> dict:
+        """Returns a dict with hold state info for both hold detectors, suitable for overlay rendering.
+
+        Returns:
+            {
+                "palm": {"state": "IDLE"|"STABILIZING"|"HOLDING"|"COOLDOWN", "hold_start": float},
+                "fist": {"state": "IDLE"|"STABILIZING"|"HOLDING"|"COOLDOWN", "hold_start": float},
+            }
+        """
+        return {
+            "palm": {
+                "state": self._hold_palm.state_name,
+                "hold_start": self._hold_palm.hold_start,
+            },
+            "fist": {
+                "state": self._hold_fist.state_name,
+                "hold_start": self._hold_fist.hold_start,
+            },
+        }

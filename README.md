@@ -20,17 +20,26 @@ Webcam → MediaPipe GestureRecognizer → Python state machine → Hammerspoon 
 ## Requirements
 
 - macOS (Apple Silicon or Intel)
-- Python 3.11+
+- Python 3.11
 - [Hammerspoon](https://www.hammerspoon.org/) installed and running
 - Webcam
 
 ## Setup
 
-### 1. Install Python dependencies
+### 1. Activate the Python 3.11 virtual environment
 
 ```bash
-pip install -r requirements.txt
+source .venv311/bin/activate
 ```
+
+The `.venv311` directory already contains the required dependencies (mediapipe, opencv-python, numpy, pytest).
+
+> First-time setup only — if `.venv311` does not exist yet:
+> ```bash
+> python3.11 -m venv .venv311
+> source .venv311/bin/activate
+> pip install -r requirements.txt
+> ```
 
 ### 2. Download the MediaPipe gesture model
 
@@ -38,18 +47,18 @@ pip install -r requirements.txt
 bash scripts/download_model.sh
 ```
 
-This places `gesture_recognizer.task` in `models/`.
+This downloads `gesture_recognizer.task` (~10 MB) into `models/`. Safe to re-run — skips download if the file already exists.
 
 ### 3. Install the Hammerspoon config
 
-Copy or symlink the Lua config into Hammerspoon's config directory:
+Copy the Lua config into Hammerspoon's config directory:
 
 ```bash
 mkdir -p ~/.hammerspoon
 cp mac/gesture_control.lua ~/.hammerspoon/gesture_control.lua
 ```
 
-Then add this line to `~/.hammerspoon/init.lua`:
+Add this line to `~/.hammerspoon/init.lua`:
 
 ```lua
 require("gesture_control")
@@ -68,29 +77,41 @@ Hammerspoon needs **Accessibility** permission to send media keys:
 open hammerspoon://play_pause
 ```
 
-You should see a brief alert and hear media toggle.
+You should see a brief on-screen alert and hear media toggle.
 
 ## Running
 
 ### Dry-run mode (no real actions fired)
 
 ```bash
+source .venv311/bin/activate
 python -m src.main --dry-run
 ```
 
-Prints detected gestures and triggered actions to the terminal. No macOS commands are sent.
+Prints detected gestures and triggered actions to stdout. No Hammerspoon commands are dispatched. The preview window shows live gesture state and hold-phase indicator.
+
+Press **q** in the preview window, or Ctrl-C in the terminal, to quit.
 
 ### Normal mode
 
 ```bash
+source .venv311/bin/activate
 python -m src.main
 ```
 
 Press **q** in the preview window to quit.
 
+### Optional flags
+
+```
+--camera INDEX   Camera device index (default: 0)
+--model PATH     Path to gesture_recognizer.task (default: models/gesture_recognizer.task)
+```
+
 ## Tests
 
 ```bash
+source .venv311/bin/activate
 pytest tests/
 ```
 
