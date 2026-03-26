@@ -1,0 +1,2 @@
+- [Hammerspoon bridge design](project_bridge_design.md) — stable 6-command URL scheme contract, Lua key names, volume clamp rules
+- [macOS setup requirements](project_setup_notes.md) — Accessibility permission, init.lua wiring, Hammerspoon reload steps
